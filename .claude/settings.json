@@ -6,5 +6,8 @@
         "repo": "seriouscoderone/keri-claude"
       }
     }
+  },
+  "enabledPlugins": {
+    "keri@keri-skills": true
   }
 }
