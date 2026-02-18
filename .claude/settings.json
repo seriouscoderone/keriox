@@ -1,0 +1,10 @@
+{
+  "extraKnownMarketplaces": {
+    "keri-claude": {
+      "source": {
+        "source": "github",
+        "repo": "seriouscoderone/keri-claude"
+      }
+    }
+  }
+}
