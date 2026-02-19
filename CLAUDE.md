@@ -75,26 +75,28 @@ Feature flags gate significant functionality and affect which modules are compil
 
 | Feature | Enables | Used by |
 |---------|---------|---------|
+| `storage-redb` | `RedbDatabase`, redb dependency (default) | witness, watcher, controller, keri-tests |
 | `query` | `query` module, `serde_cbor` | teliox, keri-sdk, controller |
 | `oobi` | `oobi` module, URL/strum deps | keri-sdk, controller, witness, watcher |
-| `oobi-manager` | `oobi_manager` + `transport` modules (implies `oobi` + `query`) | controller, witness, watcher |
-| `mailbox` | `mailbox` module (implies `query`) | witness, watcher |
+| `oobi-manager` | `oobi_manager` + `transport` modules (implies `oobi` + `query` + `storage-redb`) | controller, witness, watcher |
+| `mailbox` | `mailbox` module (implies `query` + `storage-redb`) | witness, watcher |
 
-Many `pub` items are gated behind `#[cfg(feature = "...")]`. When adding code that uses OOBI, query, or mailbox types, ensure the appropriate feature is enabled.
+Many `pub` items are gated behind `#[cfg(feature = "...")]`. When adding code that uses OOBI, query, or mailbox types, ensure the appropriate feature is enabled. When verifying compilation without redb, use: `cargo check --package keri-core --no-default-features --features query`.
 
 ## Core Abstractions
 
 ### Database Layer
 
-Storage uses **redb** (an embedded key-value store). The architecture is trait-based:
+Storage is **trait-based and feature-flagged**. The `storage-redb` feature (enabled by default) provides the concrete `RedbDatabase` implementation backed by the redb embedded key-value store. Without this feature, only trait-based code and the in-memory `MemoryDatabase` are available, enabling alternative storage backends (e.g. DynamoDB for serverless).
 
 - **`EventDatabase`** (`database/mod.rs`) — Primary trait for KEL storage: finalized events, receipts, key state, replies
 - **`LogDatabase`** (`database/mod.rs`) — Lower-level log storage with transaction support
 - **`EscrowDatabase`** / **`SequencedEventDatabase`** — Escrow storage for events awaiting completion
 - **`EscrowCreator`** — Factory trait for creating escrow database instances
-- **`RedbDatabase`** (`database/redb/mod.rs`) — Concrete implementation of all database traits
+- **`RedbDatabase`** (`database/redb/mod.rs`) — Concrete redb implementation (gated behind `storage-redb`)
+- **`MemoryDatabase`** (`database/memory/mod.rs`) — In-memory implementation for testing the trait abstraction
 
-For TEL storage, `teliox` defines its own `TelEventDatabase` trait with a `RedbTelDatabase` implementation.
+All processor and escrow code is generic over `D: EventDatabase`, so swapping storage backends requires no changes to event processing logic. For TEL storage, `teliox` defines its own `TelEventDatabase` trait with a `RedbTelDatabase` implementation (also gated behind `storage-redb`).
 
 ### Event Processing Pipeline
 
@@ -109,6 +111,18 @@ Key types in the pipeline:
 - **`Message`** — Notice or Op (query/reply)
 - **`SignedEventMessage`** — Event with signatures, optional witness receipts, optional delegator seal
 - **`Notification`** / **`NotificationBus`** — Observer pattern for escrow routing
+
+### NotificationBus (Swappable Dispatch)
+
+`NotificationBus` (`processor/notification.rs`) is a `Clone`-able wrapper around `Arc<dyn NotificationDispatch>`. It uses an internal dispatch trait to allow swapping how notifications are delivered without adding generic type parameters anywhere in the codebase.
+
+- **`NotificationDispatch`** trait — `dispatch(&self, &Notification)` and `register_observer(&self, ...)`. Implement this for custom notification delivery (e.g. SQS for serverless).
+- **`InProcessDispatch`** (private) — Default implementation preserving the original HashMap-based in-process observer pattern. Uses `RwLock` for interior mutability and `OnceLock<NotificationBus>` as a back-reference for `Notifier::notify()` callbacks.
+- **`NotificationBus::new()`** — Creates a bus with `InProcessDispatch` (default behavior).
+- **`NotificationBus::from_dispatch(Arc<dyn NotificationDispatch>)`** — Creates a bus backed by a custom dispatch implementation.
+- **`Notifier`** trait — Unchanged: `fn notify(&self, &Notification, &NotificationBus) -> Result<(), Error>`. Escrows implement this to react to notifications.
+
+All `register_observer` methods take `&self` (not `&mut self`) thanks to interior mutability in the dispatch layer.
 
 ### Processor Trait (`Processor`)
 
